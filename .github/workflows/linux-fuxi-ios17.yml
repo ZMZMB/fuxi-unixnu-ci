@@ -299,6 +299,18 @@ jobs:
           cp "$GITHUB_WORKSPACE/ci/kc_image.py" "$SRC/device-ios17/scripts/kc_image.py"
           ls -l "$SRC/device-ios17/scripts/kc_image.py"
 
+      - name: Apply the arm64e patch set hunk by hunk
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # Several owner hunks are already upstream (zz-msg-probe inserts an include xnu-10063 ships), and one stale
+          # hunk makes a whole-file git apply refuse the patch; hand the loops a hunk-wise applier instead.
+          cp "$GITHUB_WORKSPACE/ci/apply-xnu-patch.py" "$SRC/device-ios17/scripts/apply-xnu-patch.py"
+          find "$SRC" -name fuxi-kernel-baseline.sh -not -path '*/out/*' | head -n 5
+          python3 "$GITHUB_WORKSPACE/ci/patch_xnu.py" "$SRC"
+          grep -n 'apply-xnu-patch' "$SRC/device-ios17/scripts/fuxi-kernel-baseline.sh"
+
       - name: Relax the USB debug revision check for the flattened copy
         env:
           SRC: ${{ runner.temp }}/src
@@ -364,6 +376,8 @@ jobs:
           # build-ios17-verified-root.py runs from the build tree (out/fuxi/tree), so the bundle it must find is
           # named explicitly instead of being searched next to the tree.
           VERIFIED_ROOT_DIR: ${{ runner.temp }}/src/device-ios17/verified-root
+          # Absolute path, so the hunk-wise applier works even if the overlay copy lands somewhere else.
+          XNU_PATCH_HELPER: ${{ github.workspace }}/ci/apply-xnu-patch.py
 
       - name: Collect the results
         if: always()
