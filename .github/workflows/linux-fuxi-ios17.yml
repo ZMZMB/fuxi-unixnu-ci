@@ -406,6 +406,22 @@ jobs:
           cp "$h" "$SRC/device-ios17/package/DataSkel21H16.h"
           find "$SRC" -name DataSkel21H16.h -not -path '*/out/*' -exec wc -l {} +
 
+      - name: Fetch the wifi source trees
+        timeout-minutes: 30
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # archive-22 builds the WCN7850 driver and the MHI host from Linux v7.0.14 sources plus the FreeBSD releng/15.1
+          # linuxkpi headers. tools/fetch-sources.sh keeps those trees in deps/, which is ignored by the repository, so the
+          # author runs it once on macOS and never commits it; the runner starts empty.
+          w="$SRC/device/drivers/Ath12kWifiLegacy"
+          bash "$w/tools/fetch-sources.sh"
+          test -f "$w/deps/linux/drivers/net/wireless/ath/ath12k/dp.h"
+          test -f "$w/deps/linux/drivers/bus/mhi/host/boot.c"
+          test -f "$w/deps/linux/drivers/soc/qcom/qmi_interface.c"
+          du -sh "$w/deps/linux" "$w/deps/freebsd"
+
       - name: Build kernel
         timeout-minutes: 220
         run: ./unixnu build "$STEPS"
