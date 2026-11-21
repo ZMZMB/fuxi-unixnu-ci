@@ -2,12 +2,17 @@ name: fuxi ios17 kernel
 
 # iOS 17.7 (21H16) arm64e kernel for the Xiaomi 13 (fuxi).
 # Rebuilds the author's tree on the public base commit: framework commits + diff from
-# Kerfand/UniXNU-Fuxi-Arm64e-iOS17, device tree from device-fuxi-ios17.tar.gz, with
-# NATIVE_VERIFIED_BLOCK dropped so the owner root uses the development transport.
+# Kerfand/UniXNU-Fuxi-Arm64e-iOS17, device tree from device-fuxi-ios17.tar.gz. The device tree ships the
+# owner-signed VerifiedRoot policy bundle (ios17/verified-root/{os,systemos}: 160-byte header, 384-byte RSA-3072
+# signature, 395-byte trusted key anchor -- public material only, the private key stays off this repository).
 #
 #   prepare : toolchain + patches + defconfig + fetch -> caches /opt/unixnu-linux, uploads out/
 #   kernel  : restores both, builds, uploads kernel.macho, the logs and the unstripped kernel
 #             (no tar of the whole build tree: out/fuxi is ~5 GiB and rarely needed)
+#
+# verified_root=1 (default) builds with NATIVE_VERIFIED_BLOCK: every served window block is checked against the
+# owner-signed hash table, so a kernel/boot image without a matching signature cannot mount the iOS root.
+# verified_root=0 builds the development transport (no signature checks) for bring-up debugging.
 
 on:
   workflow_dispatch:
@@ -20,10 +25,15 @@ on:
         description: 'unixnu build steps'
         required: true
         default: 'kernel'
+      verified_root:
+        description: '1 = owner-signed windows (NATIVE_VERIFIED_BLOCK), 0 = development transport'
+        required: true
+        default: '1'
 
 env:
   DEFCONFIG: ${{ inputs.defconfig }}
   STEPS: ${{ inputs.steps }}
+  NATIVE_VERIFIED_BLOCK: ${{ inputs.verified_root }}
   UNIXNU_DEVICE: ${{ github.workspace }}/device
 
 jobs:
@@ -343,7 +353,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fuxi-ios17-kernel-${{ github.run_attempt }}
+          name: fuxi-ios17-kernel-${{ github.run_number }}-vr${{ inputs.verified_root }}
           path: ${{ runner.temp }}/result/*
           retention-days: 3
           if-no-files-found: warn
