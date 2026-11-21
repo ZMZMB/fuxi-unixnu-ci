@@ -281,6 +281,15 @@ jobs:
           ls -l "$SRC/device-ios17/verified-root/os" "$SRC/device-ios17/verified-root/systemos"
           grep -n 'verified-root' "$SRC/device-ios17/board.toml" | head -n 10
 
+      - name: Stage the fuxi device tree blob
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          # board.toml passes --dtb ../../../../uefi-fuxi/Resources/DTBs/fuxi.dtb, i.e. <src>/uefi-fuxi/...
+          mkdir -p "$SRC/uefi-fuxi/Resources/DTBs"
+          cp ci/fuxi.dtb "$SRC/uefi-fuxi/Resources/DTBs/fuxi.dtb"
+          ls -l "$SRC/uefi-fuxi/Resources/DTBs"
+
       - name: Relax the USB debug revision check for the flattened copy
         env:
           SRC: ${{ runner.temp }}/src
