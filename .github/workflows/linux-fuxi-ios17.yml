@@ -40,7 +40,6 @@ env:
   STEPS: ${{ inputs.steps }}
   NATIVE_VERIFIED_BLOCK: ${{ inputs.verified_root }}
   SNAPSHOT: ${{ inputs.snapshot }}
-  SRC: ${{ runner.temp }}/src
 
 jobs:
   kernel:
@@ -233,11 +232,15 @@ jobs:
 
       - name: Rebuild the source tree
         timeout-minutes: 60
+        env:
+          SRC: ${{ runner.temp }}/src
         run: |
           bash "$RUNNER_TEMP/snap/tools/reconstruct.sh" "$SRC"
           ls "$SRC"
 
       - name: Inject the owner root materials
+        env:
+          SRC: ${{ runner.temp }}/src
         run: |
           set -eu
           mkdir -p "$RUNNER_TEMP/root"
@@ -249,6 +252,8 @@ jobs:
           grep -n 'verified-root' "$SRC/device-ios17/board.toml" | head -n 10
 
       - name: Configure
+        env:
+          SRC: ${{ runner.temp }}/src
         run: ./unixnu defconfig "$DEFCONFIG" -D "$SRC/device-ios17"
         working-directory: ${{ runner.temp }}/src/UniXNU
 
@@ -284,6 +289,8 @@ jobs:
 
       - name: Collect the results
         if: always()
+        env:
+          SRC: ${{ runner.temp }}/src
         run: |
           mkdir -p "$RUNNER_TEMP/result"
           cd "$SRC/UniXNU"
