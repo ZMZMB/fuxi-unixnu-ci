@@ -422,6 +422,29 @@ jobs:
           test -f "$w/deps/linux/drivers/soc/qcom/qmi_interface.c"
           du -sh "$w/deps/linux" "$w/deps/freebsd"
 
+      - name: Warm the Adreno input cache
+        timeout-minutes: 20
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # archive-14 re-fetches the SHA-pinned msm / cmd-db sources whenever its cache is cold; the shared
+          # runner answered HTTP 503 on this pass. Warm the cache here, before the build, with retries, and
+          # assert it is complete: ensure_adreno_cache() then skips the network entirely.
+          t="$SRC/UniXNU/out/fuxi/tree"
+          for i in 1 2 3 4 5; do
+            if (cd "$t" && python3 scripts/fetch-adreno-inputs.py); then break; fi
+            echo "adreno input fetch failed (attempt $i), retrying in 20s"
+            sleep 20
+          done
+          for f in drivers/gpu/drm/msm/adreno/a6xx_gmu.c drivers/gpu/drm/msm/adreno/a6xx_gpu.c \
+                   drivers/gpu/drm/msm/adreno/a6xx_catalog.c drivers/gpu/drm/msm/registers/adreno/a6xx.xml \
+                   drivers/gpu/drm/msm/registers/adreno/a6xx_gmu.xml drivers/soc/qcom/cmd-db.c \
+                   include/soc/qcom/cmd-db.h; do
+            test -f "$t/.cache/adreno-source/$f"
+          done
+          du -sh "$t/.cache/adreno-source"
+
       - name: Build kernel
         timeout-minutes: 220
         run: ./unixnu build "$STEPS"
