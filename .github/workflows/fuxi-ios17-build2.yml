@@ -1,0 +1,525 @@
+name: fuxi ios17 kernel (linux build 3)
+
+# iOS 17.7 (21H16) arm64e kernel for the Xiaomi 13 (fuxi), built from the owner's current snapshot.
+#
+# The snapshot (Kerfand/UniXNU-Fuxi-Arm64e-iOS17) is cloned at run time and rebuilt with tools/reconstruct.sh,
+# which replays the framework commits and submodule patches and lays device/ and device-ios17/ next to each
+# other. This repository only carries the pieces the snapshot does not ship:
+#
+#   owner-root.tar.gz   verified-root/{os,systemos}: 160-byte header, 384-byte RSA-3072 signature, 395-byte
+#                       trusted key anchor and the table digest, all produced by this owner's own key. Public
+#                       material only: the private key never leaves the local machine.
+#                       scripts/build-ios17-verified-root.py links the headers into the kernel (the block hash
+#                       tables stay in userdata as the "<window>.hashes" data objects).
+#
+# verified_root=1 (default) builds with NATIVE_VERIFIED_BLOCK: every served window block is checked against the
+# owner-signed table, so a kernel or boot image without this signature cannot mount the iOS root.
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'defconfig'
+        required: true
+        default: 'fuxi_ios17_kernel_defconfig'
+      steps:
+        description: 'unixnu build steps'
+        required: true
+        default: 'kernel'
+      verified_root:
+        description: '1 = owner-signed windows (NATIVE_VERIFIED_BLOCK), 0 = development transport'
+        required: true
+        default: '1'
+      snapshot:
+        description: 'branch or tag of the owner snapshot to build'
+        required: true
+        default: 'main'
+
+env:
+  DEFCONFIG: ${{ inputs.defconfig }}
+  STEPS: ${{ inputs.steps }}
+  NATIVE_VERIFIED_BLOCK: ${{ inputs.verified_root }}
+  SNAPSHOT: ${{ inputs.snapshot }}
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out UniXNU at the fuxi base commit
+        uses: actions/checkout@v4
+        with:
+          repository: SadNutWall/UniXNU
+          ref: dec111b629bb66d3ec195c653853d8916db42b2a
+          path: unixnu
+          submodules: false
+
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Run actions/setup-python@v5
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Restore the host toolchain
+        id: toolchain-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/unixnu-linux
+          key: unixnu-linux-${{ runner.os }}-${{ hashFiles('unixnu/scripts/linux/setup-toolchain.py') }}
+
+      - name: Install the small apt packages
+        timeout-minutes: 60
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
+            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
+
+      - name: Ensure the host toolchain
+        timeout-minutes: 300
+        run: |
+          set -x
+          timeout 10800 sudo python3 scripts/linux/setup-toolchain.py
+          du -sh /opt/unixnu-linux 2>/dev/null || true
+        working-directory: unixnu
+
+      - name: Provide the Linux stand-ins for xcrun and Homebrew
+        run: |
+          sudo tee /usr/local/bin/xcrun >/dev/null <<'EOF'
+          #!/usr/bin/env bash
+          if [ "$1" = "-f" ]; then
+            p=$(command -v "$2" 2>/dev/null || true)
+            [ -n "$p" ] || p=/usr/bin/$2
+            printf '%s\n' "$p"; exit 0
+          fi
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --sdk|--toolchain) shift 2 ;;
+              --show-sdk-path)
+                for d in ${SDKROOT:-} /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
+                  if [ -f "$d/usr/include/TargetConditionals.h" ]; then printf '%s\n' "$d"; exit 0; fi
+                done
+                printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
+              -*) shift ;;
+              *) break ;;
+            esac
+          done
+          tool="$1"; shift
+          exec "$tool" "$@"
+          EOF
+          sudo tee /usr/local/bin/brew >/dev/null <<'EOF'
+          #!/usr/bin/env bash
+          if [ "$1" = "--prefix" ]; then
+            for d in /opt/unixnu-linux /opt/unixnu-linux/llvm /usr/lib/llvm-*; do
+              if [ -x "$d/bin/llvm-nm" ]; then printf '%s\n' "$d"; exit 0; fi
+            done
+            printf '%s\n' /opt/unixnu-linux; exit 0
+          fi
+          exit 1
+          EOF
+          sudo chmod +x /usr/local/bin/xcrun /usr/local/bin/brew
+          if [ ! -e /usr/bin/xcrun ]; then sudo cp /usr/local/bin/xcrun /usr/bin/xcrun; fi
+          if [ -d /opt/unixnu-linux/bin ]; then
+            for f in /opt/unixnu-linux/bin/*; do
+              sudo ln -sf "$f" "/usr/local/bin/$(basename "$f")"
+            done
+          fi
+          for t in llvm-nm llvm-objcopy llvm-ar llvm-objdump llvm-readelf llvm-size llvm-strip; do
+            if ! command -v "$t" >/dev/null 2>&1; then
+              src=$(find /usr/lib/llvm-* -type f -name "$t" 2>/dev/null | head -n1)
+              [ -n "$src" ] && sudo ln -sf "$src" "/usr/local/bin/$t"
+            fi
+          done
+
+      - name: Provide the macOS SDK header the storage step needs
+        run: |
+          set -eu
+          found=""
+          for d in /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
+            if [ -f "$d/usr/include/TargetConditionals.h" ]; then found="$d"; fi
+          done
+          if [ -z "$found" ]; then
+            echo "::warning::no macOS SDK payload in the toolchain; writing the minimal TargetConditionals.h stub"
+            sudo mkdir -p /opt/unixnu-linux/sdk/usr/include
+            sudo tee /opt/unixnu-linux/sdk/usr/include/TargetConditionals.h >/dev/null <<'EOF'
+          /* Minimal TargetConditionals.h for the Linux build host. clang already supplies
+             most of these for an -apple-ios target, so every define is guarded: this stub
+             only fills in the ones the target itself does not provide. */
+          #ifndef __TARGETCONDITIONALS__
+          #define __TARGETCONDITIONALS__
+          #ifndef TARGET_OS_MAC
+          #define TARGET_OS_MAC 1
+          #endif
+          #ifndef TARGET_OS_OSX
+          #define TARGET_OS_OSX 0
+          #endif
+          #ifndef TARGET_OS_UNIX
+          #define TARGET_OS_UNIX 1
+          #endif
+          #ifndef TARGET_OS_IPHONE
+          #define TARGET_OS_IPHONE 1
+          #endif
+          #ifndef TARGET_OS_IOS
+          #define TARGET_OS_IOS 1
+          #endif
+          #ifndef TARGET_OS_WATCH
+          #define TARGET_OS_WATCH 0
+          #endif
+          #ifndef TARGET_OS_TV
+          #define TARGET_OS_TV 0
+          #endif
+          #ifndef TARGET_OS_EMBEDDED
+          #define TARGET_OS_EMBEDDED 1
+          #endif
+          #ifndef TARGET_OS_SIMULATOR
+          #define TARGET_OS_SIMULATOR 0
+          #endif
+          #ifndef TARGET_OS_DRIVERKIT
+          #define TARGET_OS_DRIVERKIT 0
+          #endif
+          #ifndef TARGET_OS_MACCATALYST
+          #define TARGET_OS_MACCATALYST 0
+          #endif
+          #ifndef TARGET_OS_WIN32
+          #define TARGET_OS_WIN32 0
+          #endif
+          #ifndef TARGET_CPU_PPC
+          #define TARGET_CPU_PPC 0
+          #endif
+          #ifndef TARGET_CPU_PPC64
+          #define TARGET_CPU_PPC64 0
+          #endif
+          #ifndef TARGET_CPU_68K
+          #define TARGET_CPU_68K 0
+          #endif
+          #ifndef TARGET_CPU_X86
+          #define TARGET_CPU_X86 0
+          #endif
+          #ifndef TARGET_CPU_X86_64
+          #define TARGET_CPU_X86_64 0
+          #endif
+          #ifndef TARGET_CPU_ARM
+          #define TARGET_CPU_ARM 0
+          #endif
+          #ifndef TARGET_CPU_ARM64
+          #define TARGET_CPU_ARM64 1
+          #endif
+          #ifndef TARGET_RT_LITTLE_ENDIAN
+          #define TARGET_RT_LITTLE_ENDIAN 1
+          #endif
+          #ifndef TARGET_RT_BIG_ENDIAN
+          #define TARGET_RT_BIG_ENDIAN 0
+          #endif
+          #ifndef TARGET_RT_64_BIT
+          #define TARGET_RT_64_BIT 1
+          #endif
+          #endif
+          EOF
+          fi
+          echo "macOS SDK: ${found:-stub at /opt/unixnu-linux/sdk}"
+          ls /opt/unixnu-linux | head -n 12 || true
+
+      - name: Install a Mach-O capable llvm-objcopy
+        run: |
+          set -eux
+          # Ubuntu's llvm-objcopy refuses the two Mach-O options every owner builder uses for C++ static
+          # initialisers ("option is not supported for MachO"); Apple's toolchain has them. This shim handles
+          # those two options on the object file and hands everything else to the real binary.
+          mkdir -p "$HOME/.local/bin"
+          cp "$GITHUB_WORKSPACE/ci/macho-objcopy.py" "$HOME/.local/bin/llvm-objcopy"
+          chmod +x "$HOME/.local/bin/llvm-objcopy"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          ls -l "$(command -v llvm-objcopy)"
+
+      - name: Clone the owner snapshot
+        timeout-minutes: 30
+        run: |
+          git clone --depth 1 --branch "$SNAPSHOT" \
+            https://github.com/Kerfand/UniXNU-Fuxi-Arm64e-iOS17.git "$RUNNER_TEMP/snap"
+          git -C "$RUNNER_TEMP/snap" log --oneline -1
+
+      - name: Rebuild the source tree
+        timeout-minutes: 60
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          bash "$RUNNER_TEMP/snap/tools/reconstruct.sh" "$SRC"
+          ls "$SRC"
+
+      - name: Relax the USB debug module's own model check
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          python3 ci/patch_usb.py "$SRC"
+
+      - name: Align the submodule links with the rebuilt commits
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          cd "$SRC/UniXNU"
+          git config user.email ci@localhost
+          git config user.name ci
+          git config commit.gpgsign false
+          git config advice.detachedHead false
+          # reconstruct.sh replays the owner's local commits into each submodule, so their hashes differ from the
+          # gitlinks the owner's own commits record (those point at commits that only exist on his machine). The
+          # links are repointed at the rebuilt commits so "unixnu fetch" stops asking the public remotes for them.
+          for p in $(git ls-tree -r HEAD | awk '$1=="160000"{print $4}'); do
+            [ -e "$SRC/UniXNU/$p" ] || continue
+            h=$(git -C "$SRC/UniXNU/$p" rev-parse HEAD)
+            git update-index --cacheinfo 160000,"$h","$p"
+            echo "  $p -> $h"
+          done
+          if ! git diff --cached --quiet; then
+            git commit -qm "ci: align the submodule links to the rebuilt commits"
+          fi
+          git log --oneline -2
+
+      - name: Inject the owner root materials
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/root"
+          unzip -q ci/owner-root.zip -d "$RUNNER_TEMP/root"
+          cp -a "$RUNNER_TEMP/root/verified-root" "$SRC/device-ios17/verified-root"
+          cp -a "$RUNNER_TEMP/root/scripts/build-ios17-verified-root.py" \
+                "$SRC/device-ios17/scripts/build-ios17-verified-root.py"
+          ls -l "$SRC/device-ios17/verified-root/os" "$SRC/device-ios17/verified-root/systemos"
+          grep -n 'verified-root' "$SRC/device-ios17/board.toml" | head -n 10
+
+      - name: Stage the fuxi device tree blob
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          # board.toml passes --dtb ../../../../uefi-fuxi/Resources/DTBs/fuxi.dtb, i.e. <src>/uefi-fuxi/...
+          mkdir -p "$SRC/uefi-fuxi/Resources/DTBs"
+          cp ci/fuxi.dtb "$SRC/uefi-fuxi/Resources/DTBs/fuxi.dtb"
+          ls -l "$SRC/uefi-fuxi/Resources/DTBs"
+
+      - name: Install the kernelcache reader into the device overlay
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          # The build tree is only assembled by `unixnu build`, so the reader ships through the device overlay that
+          # the tree is copied from; build-ios17-hid-input.py runs with tree/scripts on sys.path.
+          cp "$GITHUB_WORKSPACE/ci/kc_image.py" "$SRC/device-ios17/scripts/kc_image.py"
+          ls -l "$SRC/device-ios17/scripts/kc_image.py"
+
+      - name: Apply the arm64e patch set hunk by hunk
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # Several owner hunks are already upstream (zz-msg-probe inserts an include xnu-10063 ships), and one stale
+          # hunk makes a whole-file git apply refuse the patch; hand the loops a hunk-wise applier instead.
+          cp "$GITHUB_WORKSPACE/ci/apply-xnu-patch.py" "$SRC/device-ios17/scripts/apply-xnu-patch.py"
+          find "$SRC" -name fuxi-kernel-baseline.sh -not -path '*/out/*' | head -n 5
+          python3 "$GITHUB_WORKSPACE/ci/patch_xnu.py" "$SRC"
+          grep -n 'apply-xnu-patch' "$SRC/device-ios17/scripts/fuxi-kernel-baseline.sh"
+
+      - name: Relax the USB debug revision check for the flattened copy
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          python3 ci/patch_qud.py "$SRC"
+
+      - name: Qualify the GPU driver by content after the replay
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          python3 ci/patch_adreno.py "$SRC"
+
+      - name: Configure
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: ./unixnu defconfig "$DEFCONFIG" -D "$SRC/device-ios17"
+        working-directory: ${{ runner.temp }}/src/UniXNU
+
+      - name: Fetch the sources
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./unixnu fetch
+        working-directory: ${{ runner.temp }}/src/UniXNU
+
+      - name: Normalise the reference links
+        run: |
+          set -eux
+          for link in out/fuxi/tree/refer/*; do
+            [ -e "$link" ] || continue
+            [ -L "$link" ] && continue
+            name=$(basename "$link")
+            feed=$(ls -d "out/fuxi/feeds/$name-"* 2>/dev/null | head -n1 || true)
+            if [ -n "$feed" ]; then
+              rm -rf "$link"
+              ln -sfn "$(cd "$feed" && pwd)" "$link"
+            fi
+          done
+          ls -l out/fuxi/tree/refer | head -n 20
+        working-directory: ${{ runner.temp }}/src/UniXNU
+
+      - name: Expand the 21H16 kernelcache
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          python3 -m pip install --quiet pyimg4 lzfse
+          python3 ci/unpack_kernelcache.py ci/kernelcache.release.iphone15 \
+            "$SRC/UniXNU/out/ipsw/21H16/kernelcache.decompressed"
+
+      - name: Stage the pinned fuxi GPU firmware
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # archive-19 pulls these three blobs from the GitHub API and the shared runner IP is already rate limited
+          # (HTTP 403 rate limit exceeded). Ship the pinned bytes; the builder skips the download when they exist.
+          root="$SRC/UniXNU/out/fuxi/tree"
+          mkdir -p "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi"
+          cp ci/gmu_gen70200.bin "$root/.cache/firmware/fuxi-gpu/qcom/gmu_gen70200.bin"
+          cp ci/a740_sqe.fw "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi/a740_sqe.fw"
+          cp ci/a740_zap.mbn "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi/a740_zap.mbn"
+          ls -l "$root/.cache/firmware/fuxi-gpu/qcom" "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi"
+
+      - name: Stage the 21H16 data skeleton
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # BootWatchdogPolicy.c includes "DataSkel21H16.h": the 21H16 OS volume's /private/var template as a table
+          # (tools/mkskel.py). Upstream never commits it because it embeds the volume's bytes. Rebuilt here from the
+          # same 044-18520-018.dmg: 104 directories (Keychains 64:0 0755, mobile 501:501, tmp 1777), 1 symlink,
+          # 8 small template files.
+          h="$GITHUB_WORKSPACE/ci/DataSkel21H16.h"
+          test -s "$h"
+          # Quoted include: clang looks next to BootWatchdogPolicy.c first, so seed every directory that holds it.
+          find "$SRC" -name BootWatchdogPolicy.c -printf '%h\n' | sort -u | while IFS= read -r d; do
+            cp "$h" "$d/DataSkel21H16.h"
+            echo "staged $d/DataSkel21H16.h"
+          done
+          mkdir -p "$SRC/device-ios17/package"
+          cp "$h" "$SRC/device-ios17/package/DataSkel21H16.h"
+          find "$SRC" -name DataSkel21H16.h -not -path '*/out/*' -exec wc -l {} +
+
+      - name: Fetch the wifi source trees
+        timeout-minutes: 30
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # archive-22 builds the WCN7850 driver and the MHI host from Linux v7.0.14 sources plus the FreeBSD releng/15.1
+          # linuxkpi headers. tools/fetch-sources.sh keeps those trees in deps/, which is ignored by the repository, so the
+          # author runs it once on macOS and never commits it; the runner starts empty.
+          w="$SRC/device/drivers/Ath12kWifiLegacy"
+          bash "$w/tools/fetch-sources.sh"
+          test -f "$w/deps/linux/drivers/net/wireless/ath/ath12k/dp.h"
+          test -f "$w/deps/linux/drivers/bus/mhi/host/boot.c"
+          test -f "$w/deps/linux/drivers/soc/qcom/qmi_interface.c"
+          du -sh "$w/deps/linux" "$w/deps/freebsd"
+
+      - name: Warm the Adreno input cache
+        timeout-minutes: 20
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # archive-14 re-fetches the SHA-pinned msm / cmd-db sources whenever its cache is cold, and the shared
+          # runner answered HTTP 503 on this pass. The build tree is materialised later, so warm the cache in the
+          # rebuilt checkout that owns the fetcher, then seed ensure_adreno_cache() from it.
+          here=$(find "$SRC" -name fetch-adreno-inputs.py -printf '%h\n' 2>/dev/null | head -n 1)
+          test -n "$here"
+          c=$(dirname "$here")
+          echo "fetcher under $c"
+          set +e
+          ok=0
+          for i in 1 2 3 4 5; do
+            if (cd "$c" && python3 scripts/fetch-adreno-inputs.py); then ok=1; break; fi
+            echo "adreno input fetch failed (attempt $i), retrying in 20s"
+            sleep 20
+          done
+          set -e
+          test "$ok" = 1
+          for f in drivers/gpu/drm/msm/adreno/a6xx_gmu.c drivers/gpu/drm/msm/adreno/a6xx_gpu.c \
+                   drivers/gpu/drm/msm/adreno/a6xx_catalog.c drivers/gpu/drm/msm/registers/adreno/a6xx.xml \
+                   drivers/gpu/drm/msm/registers/adreno/a6xx_gmu.xml drivers/soc/qcom/cmd-db.c \
+                   include/soc/qcom/cmd-db.h; do
+            test -f "$c/.cache/adreno-source/$f"
+          done
+          mkdir -p "$SRC/device/.cache/adreno-source"
+          cp -a "$c/.cache/adreno-source/." "$SRC/device/.cache/adreno-source/"
+          du -sh "$SRC/device/.cache/adreno-source"
+          python3 "$GITHUB_WORKSPACE/ci/patch_adreno_cache.py" "$SRC"
+          # The prepare archives verify the pinned SHA of every source they read, so they must see the pins the
+          # fetcher used together with the cache it filled; pass both explicitly through the board manifest.
+          pins="$c/scripts/data/adreno-inputs.json"
+          if [ ! -f "$pins" ]; then
+            pins=$(find "$SRC" -name adreno-inputs.json | head -n 1)
+          fi
+          test -f "$pins"
+          python3 "$GITHUB_WORKSPACE/ci/patch_board_adreno.py" "$SRC" "$SRC/device/.cache/adreno-source" "$pins"
+
+      - name: Build kernel
+        timeout-minutes: 220
+        run: ./unixnu build "$STEPS"
+        working-directory: ${{ runner.temp }}/src/UniXNU
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The ios17 archive builders pick their code paths from kernel_target: without this they compile every
+          # object for arm64 and build-adreno740-accelerator refuses the arm64e 21H16 fileset.
+          UNIXNU_XNU_ARCH: arm64e
+          UNIXNU_FILESET_KERNEL_FIRST: '1'
+          XNU_KERNEL_CHAINED_FIXUPS: '1'
+          UNIXNU_KERNELCACHE: ${{ runner.temp }}/src/UniXNU/out/ipsw/21H16/kernelcache.decompressed
+          # build-ios17-verified-root.py runs from the build tree (out/fuxi/tree), so the bundle it must find is
+          # named explicitly instead of being searched next to the tree.
+          VERIFIED_ROOT_DIR: ${{ runner.temp }}/src/device-ios17/verified-root
+          # Absolute path, so the hunk-wise applier works even if the overlay copy lands somewhere else.
+          XNU_PATCH_HELPER: ${{ github.workspace }}/ci/apply-xnu-patch.py
+          # The cache warmed by "Warm the Adreno input cache": archive-14 seeds itself from it and never
+          # reaches GitHub, which answered 503 for the pinned msm/cmd-db blobs.
+          UNIXNU_ADRENO_CACHE_SOURCE: ${{ runner.temp }}/src/device/.cache/adreno-source
+
+      - name: Collect the results
+        if: always()
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          mkdir -p "$RUNNER_TEMP/result"
+          cd "$SRC/UniXNU"
+          find out -maxdepth 6 -name 'kernel.macho' -exec cp {} "$RUNNER_TEMP/result/" \; || true
+          find out -maxdepth 6 -name '*.log' -exec cp {} "$RUNNER_TEMP/result/" \; || true
+          # Deliberately no tar of the whole build tree: out/fuxi is ~5 GiB of object files and only matters for
+          # a rebuild without sources. Keep the intermediates that panic symbolication needs.
+          find out -name 'mach.*.unstripped.noctf' -exec cp {} "$RUNNER_TEMP/result/" \; 2>/dev/null || true
+          for bundle in out/fuxi/build/verified-root-os-xnu-bundle out/*/build/verified-root-os-xnu-bundle; do
+            if [ -d "$bundle" ]; then
+              mkdir -p "$RUNNER_TEMP/result/verified-root-os-xnu-bundle"
+              cp -r "$bundle/." "$RUNNER_TEMP/result/verified-root-os-xnu-bundle/" 2>/dev/null || true
+            fi
+          done
+          ls -la "$RUNNER_TEMP/result" | head -n 40
+          du -sh "$RUNNER_TEMP/result" || true
+          df -h /
+
+      - name: Upload the kernel and the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuxi-ios17-kernel-${{ github.run_number }}-vr${{ inputs.verified_root }}
+          path: ${{ runner.temp }}/result/*
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "defconfig: $DEFCONFIG" >> "$GITHUB_STEP_SUMMARY"
+          echo "steps: $STEPS" >> "$GITHUB_STEP_SUMMARY"
+          echo "snapshot: $SNAPSHOT" >> "$GITHUB_STEP_SUMMARY"
+          du -sh "$RUNNER_TEMP/result" 2>/dev/null || true
