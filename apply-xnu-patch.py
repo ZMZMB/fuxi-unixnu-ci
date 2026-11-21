@@ -100,7 +100,13 @@ def apply_hunk(lines, hunk, rel, name, report):
     if at is not None:
         lines[at:at + len(old)] = new
         return True
-    # Already there? Every added line present and every removed line gone.
+    # Already there? The post-image block itself is in place (a hunk that moves a line keeps the
+    # moved line, so "every removed line is gone" cannot decide this on a tree that already carries
+    # the patch: the second pass of build-xnu-4k-baseline.sh applies the same set again).
+    if new and find(lines, new, near) is not None:
+        report.append(f'{rel}:{hunk["old_start"]} already applied, skipped')
+        return True
+    # Otherwise: every added line present and every removed line gone.
     added = [line[1:] for line in hunk['lines'] if line[0] == '+']
     removed = [line[1:] for line in hunk['lines'] if line[0] == '-']
     if all(text in lines for text in added) and not any(text in lines for text in removed):
