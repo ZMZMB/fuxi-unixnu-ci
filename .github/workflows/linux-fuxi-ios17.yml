@@ -345,12 +345,18 @@ jobs:
           set -eux
           # build-ios17-hid-input.py and build-ios17-legacy-display.py import kc_image from the build tree's scripts;
           # the snapshot leaves that module on the owner's machine, so the audited reader ships with this repository.
-          cp ci/kc_image.py out/fuxi/tree/scripts/kc_image.py
+          cp "$GITHUB_WORKSPACE/ci/kc_image.py" out/fuxi/tree/scripts/kc_image.py
           ./unixnu build "$STEPS"
         working-directory: ${{ runner.temp }}/src/UniXNU
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The ios17 archive builders pick their code paths from kernel_target: without this they compile every
+          # object for arm64 and build-adreno740-accelerator refuses the arm64e 21H16 fileset.
+          UNIXNU_XNU_ARCH: arm64e
+          UNIXNU_FILESET_KERNEL_FIRST: '1'
+          XNU_KERNEL_CHAINED_FIXUPS: '1'
+          UNIXNU_KERNELCACHE: ${{ runner.temp }}/src/UniXNU/out/ipsw/21H16/kernelcache.decompressed
           # build-ios17-verified-root.py runs from the build tree (out/fuxi/tree), so the bundle it must find is
           # named explicitly instead of being searched next to the tree.
           VERIFIED_ROOT_DIR: ${{ runner.temp }}/src/device-ios17/verified-root
