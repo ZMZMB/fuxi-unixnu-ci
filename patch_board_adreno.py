@@ -10,11 +10,11 @@ cache = sys.argv[2]
 pins = sys.argv[3]
 NAMES = ('prepare-fuxi-gmu-votes.py', 'prepare-fuxi-gmu.py', 'prepare-fuxi-command-db-oracle.py')
 
-boards = sorted(p for p in root.glob('*/ios17/board.toml'))
-if not boards:
-    boards = sorted(root.glob('**/ios17/board.toml'))
+boards = [p for p in sorted(root.glob('**/ios17/board.toml'))
+          if '/out/' not in str(p).replace('\\', '/')]
 if not boards:
     raise SystemExit('no ios17/board.toml under ' + str(root))
+print('boards:', ', '.join(str(b) for b in boards))
 
 for board in boards:
     text = board.read_text()
