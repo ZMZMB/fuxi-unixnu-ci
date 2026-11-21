@@ -223,6 +223,18 @@ jobs:
           echo "macOS SDK: ${found:-stub at /opt/unixnu-linux/sdk}"
           ls /opt/unixnu-linux | head -n 12 || true
 
+      - name: Install a Mach-O capable llvm-objcopy
+        run: |
+          set -eux
+          # Ubuntu's llvm-objcopy refuses the two Mach-O options every owner builder uses for C++ static
+          # initialisers ("option is not supported for MachO"); Apple's toolchain has them. This shim handles
+          # those two options on the object file and hands everything else to the real binary.
+          mkdir -p "$HOME/.local/bin"
+          cp "$GITHUB_WORKSPACE/ci/macho-objcopy.py" "$HOME/.local/bin/llvm-objcopy"
+          chmod +x "$HOME/.local/bin/llvm-objcopy"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          ls -l "$(command -v llvm-objcopy)"
+
       - name: Clone the owner snapshot
         timeout-minutes: 30
         run: |
