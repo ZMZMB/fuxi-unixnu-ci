@@ -275,6 +275,12 @@ jobs:
           ls -l "$SRC/device-ios17/verified-root/os" "$SRC/device-ios17/verified-root/systemos"
           grep -n 'verified-root' "$SRC/device-ios17/board.toml" | head -n 10
 
+      - name: Relax the USB debug revision check for the flattened copy
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          python3 ci/patch_qud.py "$SRC"
+
       - name: Configure
         env:
           SRC: ${{ runner.temp }}/src
