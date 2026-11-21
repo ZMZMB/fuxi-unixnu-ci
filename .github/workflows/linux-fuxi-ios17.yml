@@ -238,6 +238,30 @@ jobs:
           bash "$RUNNER_TEMP/snap/tools/reconstruct.sh" "$SRC"
           ls "$SRC"
 
+      - name: Align the submodule links with the rebuilt commits
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          cd "$SRC/UniXNU"
+          git config user.email ci@localhost
+          git config user.name ci
+          git config commit.gpgsign false
+          git config advice.detachedHead false
+          # reconstruct.sh replays the owner's local commits into each submodule, so their hashes differ from the
+          # gitlinks the owner's own commits record (those point at commits that only exist on his machine). The
+          # links are repointed at the rebuilt commits so "unixnu fetch" stops asking the public remotes for them.
+          for p in $(git ls-tree -r HEAD | awk '$1=="160000"{print $4}'); do
+            [ -e "$SRC/UniXNU/$p" ] || continue
+            h=$(git -C "$SRC/UniXNU/$p" rev-parse HEAD)
+            git update-index --cacheinfo 160000,"$h","$p"
+            echo "  $p -> $h"
+          done
+          if ! git diff --cached --quiet; then
+            git commit -qm "ci: align the submodule links to the rebuilt commits"
+          fi
+          git log --oneline -2
+
       - name: Inject the owner root materials
         env:
           SRC: ${{ runner.temp }}/src
