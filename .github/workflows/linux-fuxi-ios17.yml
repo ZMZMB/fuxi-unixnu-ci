@@ -290,6 +290,15 @@ jobs:
           cp ci/fuxi.dtb "$SRC/uefi-fuxi/Resources/DTBs/fuxi.dtb"
           ls -l "$SRC/uefi-fuxi/Resources/DTBs"
 
+      - name: Install the kernelcache reader into the device overlay
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          # The build tree is only assembled by `unixnu build`, so the reader ships through the device overlay that
+          # the tree is copied from; build-ios17-hid-input.py runs with tree/scripts on sys.path.
+          cp "$GITHUB_WORKSPACE/ci/kc_image.py" "$SRC/device-ios17/scripts/kc_image.py"
+          ls -l "$SRC/device-ios17/scripts/kc_image.py"
+
       - name: Relax the USB debug revision check for the flattened copy
         env:
           SRC: ${{ runner.temp }}/src
@@ -341,12 +350,7 @@ jobs:
 
       - name: Build kernel
         timeout-minutes: 220
-        run: |
-          set -eux
-          # build-ios17-hid-input.py and build-ios17-legacy-display.py import kc_image from the build tree's scripts;
-          # the snapshot leaves that module on the owner's machine, so the audited reader ships with this repository.
-          cp "$GITHUB_WORKSPACE/ci/kc_image.py" out/fuxi/tree/scripts/kc_image.py
-          ./unixnu build "$STEPS"
+        run: ./unixnu build "$STEPS"
         working-directory: ${{ runner.temp }}/src/UniXNU
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
