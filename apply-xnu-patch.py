@@ -96,15 +96,15 @@ def find(lines, old, near):
 def apply_hunk(lines, hunk, rel, name, report):
     old, new = split(hunk)
     near = max(0, hunk['old_start'] - 1)
+    # The finished block already in place means this hunk landed before. build-xnu-4k-baseline.sh replays
+    # the whole series on the tree the bootstrap pass already patched, and a pure insertion hunk keeps
+    # every context line, so searching the old block first would insert its lines a second time.
+    if new and find(lines, new, near) is not None:
+        report.append(f'{rel}:{hunk["old_start"]} already applied, skipped')
+        return True
     at = find(lines, old, near)
     if at is not None:
         lines[at:at + len(old)] = new
-        return True
-    # Already there? The post-image block itself is in place (a hunk that moves a line keeps the
-    # moved line, so "every removed line is gone" cannot decide this on a tree that already carries
-    # the patch: the second pass of build-xnu-4k-baseline.sh applies the same set again).
-    if new and find(lines, new, near) is not None:
-        report.append(f'{rel}:{hunk["old_start"]} already applied, skipped')
         return True
     # Otherwise: every added line present and every removed line gone.
     added = [line[1:] for line in hunk['lines'] if line[0] == '+']
