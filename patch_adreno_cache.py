@@ -11,22 +11,20 @@ ANCHOR = '    if all((cache / name).is_file() for name in required):\n        re
 INSERT = (
     '    prefetch = os.environ.get("UNIXNU_ADRENO_CACHE_SOURCE", "")\n'
     '    if prefetch and Path(prefetch).is_dir():\n'
-    '        for name in required:\n'
-    '            dst = cache / name\n'
-    '            src = Path(prefetch) / name\n'
-    '            if not dst.is_file() and src.is_file():\n'
+    '        base = Path(prefetch)\n'
+    '        for src in base.rglob("*"):\n'
+    '            if src.is_file():\n'
+    '                dst = cache / src.relative_to(base)\n'
     '                dst.parent.mkdir(parents=True, exist_ok=True)\n'
     '                dst.write_bytes(src.read_bytes())\n'
 )
 
 root = pathlib.Path(sys.argv[1])
-targets = []
-for base in (root / 'device', root / 'UniXNU' / 'out' / 'fuxi' / 'tree'):
-    p = base / 'scripts' / 'fuxi_adreno_common.py'
-    if p.is_file():
-        targets.append(p)
+targets = [p for p in sorted(root.glob('**/scripts/fuxi_adreno_common.py'))
+           if '/out/' not in str(p).replace('\\', '/')]
 if not targets:
     raise SystemExit('no fuxi_adreno_common.py under ' + str(root))
+print('targets:', ', '.join(str(t) for t in targets))
 
 for path in targets:
     text = path.read_text()
