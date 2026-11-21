@@ -51,8 +51,13 @@ def parse(path):
             hunk = {'old_start': int(old_part[1:].split(',')[0]), 'new_start': int(new_part[1:].split(',')[0]),
                     'lines': []}
             current['hunks'].append(hunk)
-        elif current is not None and hunk is not None and line[:1] in (' ', '+', '-', '\\'):
-            hunk['lines'].append(line)
+        elif current is not None and hunk is not None:
+            if line[:1] in (' ', '+', '-', '\\'):
+                hunk['lines'].append(line)
+            elif line in ('\n', '\r\n'):
+                # A blank context line is written as an empty line by some diff tools, not as " ". Dropping it
+                # would glue two context lines together and the hunk could never match the file.
+                hunk['lines'].append(' ' + line)
     if current:
         files.append(current)
     return files
