@@ -296,6 +296,12 @@ jobs:
         run: |
           python3 ci/patch_qud.py "$SRC"
 
+      - name: Qualify the GPU driver by content after the replay
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          python3 ci/patch_adreno.py "$SRC"
+
       - name: Configure
         env:
           SRC: ${{ runner.temp }}/src
