@@ -330,9 +330,23 @@ jobs:
           ls -l out/fuxi/tree/refer | head -n 20
         working-directory: ${{ runner.temp }}/src/UniXNU
 
+      - name: Expand the 21H16 kernelcache
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          python3 -m pip install --quiet pyimg4 lzfse
+          python3 ci/unpack_kernelcache.py ci/kernelcache.release.iphone15 \
+            "$SRC/UniXNU/out/ipsw/21H16/kernelcache.decompressed"
+
       - name: Build kernel
         timeout-minutes: 220
-        run: ./unixnu build "$STEPS"
+        run: |
+          set -eux
+          # build-ios17-hid-input.py and build-ios17-legacy-display.py import kc_image from the build tree's scripts;
+          # the snapshot leaves that module on the owner's machine, so the audited reader ships with this repository.
+          cp ci/kc_image.py out/fuxi/tree/scripts/kc_image.py
+          ./unixnu build "$STEPS"
         working-directory: ${{ runner.temp }}/src/UniXNU
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
