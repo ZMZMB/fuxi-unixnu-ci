@@ -316,6 +316,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # build-ios17-verified-root.py runs from the build tree (out/fuxi/tree), so the bundle it must find is
+          # named explicitly instead of being searched next to the tree.
+          VERIFIED_ROOT_DIR: ${{ runner.temp }}/src/device-ios17/verified-root
 
       - name: Collect the results
         if: always()
