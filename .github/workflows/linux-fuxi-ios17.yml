@@ -1,18 +1,19 @@
 name: fuxi ios17 kernel
 
-# iOS 17.7 (21H16) arm64e kernel for the Xiaomi 13 (fuxi).
-# Rebuilds the author's tree on the public base commit: framework commits + diff from
-# Kerfand/UniXNU-Fuxi-Arm64e-iOS17, device tree from device-fuxi-ios17.tar.gz. The device tree ships the
-# owner-signed VerifiedRoot policy bundle (ios17/verified-root/{os,systemos}: 160-byte header, 384-byte RSA-3072
-# signature, 395-byte trusted key anchor -- public material only, the private key stays off this repository).
+# iOS 17.7 (21H16) arm64e kernel for the Xiaomi 13 (fuxi), built from the owner's current snapshot.
 #
-#   prepare : toolchain + patches + defconfig + fetch -> caches /opt/unixnu-linux, uploads out/
-#   kernel  : restores both, builds, uploads kernel.macho, the logs and the unstripped kernel
-#             (no tar of the whole build tree: out/fuxi is ~5 GiB and rarely needed)
+# The snapshot (Kerfand/UniXNU-Fuxi-Arm64e-iOS17) is cloned at run time and rebuilt with tools/reconstruct.sh,
+# which replays the framework commits and submodule patches and lays device/ and device-ios17/ next to each
+# other. This repository only carries the pieces the snapshot does not ship:
+#
+#   owner-root.tar.gz   verified-root/{os,systemos}: 160-byte header, 384-byte RSA-3072 signature, 395-byte
+#                       trusted key anchor and the table digest, all produced by this owner's own key. Public
+#                       material only: the private key never leaves the local machine.
+#                       scripts/build-ios17-verified-root.py links the headers into the kernel (the block hash
+#                       tables stay in userdata as the "<window>.hashes" data objects).
 #
 # verified_root=1 (default) builds with NATIVE_VERIFIED_BLOCK: every served window block is checked against the
-# owner-signed hash table, so a kernel/boot image without a matching signature cannot mount the iOS root.
-# verified_root=0 builds the development transport (no signature checks) for bring-up debugging.
+# owner-signed table, so a kernel or boot image without this signature cannot mount the iOS root.
 
 on:
   workflow_dispatch:
@@ -29,15 +30,20 @@ on:
         description: '1 = owner-signed windows (NATIVE_VERIFIED_BLOCK), 0 = development transport'
         required: true
         default: '1'
+      snapshot:
+        description: 'branch or tag of the owner snapshot to build'
+        required: true
+        default: 'main'
 
 env:
   DEFCONFIG: ${{ inputs.defconfig }}
   STEPS: ${{ inputs.steps }}
   NATIVE_VERIFIED_BLOCK: ${{ inputs.verified_root }}
-  UNIXNU_DEVICE: ${{ github.workspace }}/device
+  SNAPSHOT: ${{ inputs.snapshot }}
+  SRC: ${{ runner.temp }}/src
 
 jobs:
-  prepare:
+  kernel:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -59,33 +65,6 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Rebuild the iOS 17 framework tree
-        run: |
-          tar -xzf ci/framework-ios17.tar.gz -C "$RUNNER_TEMP"
-          bash "$RUNNER_TEMP/fw/setup-tree.sh" "$RUNNER_TEMP/fw" "$GITHUB_WORKSPACE/unixnu"
-          git -C unixnu log --oneline -8 || true
-
-      - name: Unpack the fuxi iOS 17 device repository
-        run: |
-          tar -xzf ci/device-fuxi-ios17.tar.gz
-          ls device | head -n 40
-          test -f device/board.toml
-          test -f "device/configs/$DEFCONFIG"
-          test -d device/patches/xnu-10063-arm64e
-          grep -c 'DNATIVE_VERIFIED_BLOCK=1' device/scripts/build-arm-driver.py || true
-
-      - name: Initialise the device repository
-        run: |
-          cd device
-          git init -q
-          git config user.email ci@localhost
-          git config user.name ci
-          git config commit.gpgsign false
-          git add -A
-          git commit -qm "fuxi device tree"
-          git log --oneline -1
-          test ! -f .gitmodules
-
       - name: Restore the host toolchain
         id: toolchain-cache
         uses: actions/cache@v4
@@ -93,26 +72,21 @@ jobs:
           path: /opt/unixnu-linux
           key: unixnu-linux-${{ runner.os }}-${{ hashFiles('unixnu/scripts/linux/setup-toolchain.py') }}
 
-      - name: Install host tools
+      - name: Install the small apt packages
+        timeout-minutes: 60
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
+            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
+
+      - name: Ensure the host toolchain
         timeout-minutes: 300
         run: |
           set -x
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
-            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
-          python3 scripts/linux/setup-toolchain.py --print-packages || true
           timeout 10800 sudo python3 scripts/linux/setup-toolchain.py
           du -sh /opt/unixnu-linux 2>/dev/null || true
-          ls -l /usr/bin/xcrun 2>/dev/null || true
         working-directory: unixnu
-
-      - name: Install the small apt packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
-            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
 
       - name: Provide the Linux stand-ins for xcrun and Homebrew
         run: |
@@ -161,155 +135,128 @@ jobs:
               [ -n "$src" ] && sudo ln -sf "$src" "/usr/local/bin/$t"
             fi
           done
-          for t in xcrun brew clang llvm-nm llvm-objcopy llvm-ar lzfse dtc make; do
-            printf '%-14s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
-          done
 
-      - name: Report the runner toolchain
+      - name: Provide the macOS SDK header the storage step needs
         run: |
-          uname -a
-          python3 --version
-          for t in git make clang cmake ninja unifdef ld lzfse dtc; do
-            printf '%-8s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+          set -eu
+          found=""
+          for d in /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
+            if [ -f "$d/usr/include/TargetConditionals.h" ]; then found="$d"; fi
           done
-          ls /opt/unixnu-linux
-          df -h /
+          if [ -z "$found" ]; then
+            echo "::warning::no macOS SDK payload in the toolchain; writing the minimal TargetConditionals.h stub"
+            sudo mkdir -p /opt/unixnu-linux/sdk/usr/include
+            sudo tee /opt/unixnu-linux/sdk/usr/include/TargetConditionals.h >/dev/null <<'EOF'
+          /* Minimal TargetConditionals.h for the Linux build host. clang already supplies
+             most of these for an -apple-ios target, so every define is guarded: this stub
+             only fills in the ones the target itself does not provide. */
+          #ifndef __TARGETCONDITIONALS__
+          #define __TARGETCONDITIONALS__
+          #ifndef TARGET_OS_MAC
+          #define TARGET_OS_MAC 1
+          #endif
+          #ifndef TARGET_OS_OSX
+          #define TARGET_OS_OSX 0
+          #endif
+          #ifndef TARGET_OS_UNIX
+          #define TARGET_OS_UNIX 1
+          #endif
+          #ifndef TARGET_OS_IPHONE
+          #define TARGET_OS_IPHONE 1
+          #endif
+          #ifndef TARGET_OS_IOS
+          #define TARGET_OS_IOS 1
+          #endif
+          #ifndef TARGET_OS_WATCH
+          #define TARGET_OS_WATCH 0
+          #endif
+          #ifndef TARGET_OS_TV
+          #define TARGET_OS_TV 0
+          #endif
+          #ifndef TARGET_OS_EMBEDDED
+          #define TARGET_OS_EMBEDDED 1
+          #endif
+          #ifndef TARGET_OS_SIMULATOR
+          #define TARGET_OS_SIMULATOR 0
+          #endif
+          #ifndef TARGET_OS_DRIVERKIT
+          #define TARGET_OS_DRIVERKIT 0
+          #endif
+          #ifndef TARGET_OS_MACCATALYST
+          #define TARGET_OS_MACCATALYST 0
+          #endif
+          #ifndef TARGET_OS_WIN32
+          #define TARGET_OS_WIN32 0
+          #endif
+          #ifndef TARGET_CPU_PPC
+          #define TARGET_CPU_PPC 0
+          #endif
+          #ifndef TARGET_CPU_PPC64
+          #define TARGET_CPU_PPC64 0
+          #endif
+          #ifndef TARGET_CPU_68K
+          #define TARGET_CPU_68K 0
+          #endif
+          #ifndef TARGET_CPU_X86
+          #define TARGET_CPU_X86 0
+          #endif
+          #ifndef TARGET_CPU_X86_64
+          #define TARGET_CPU_X86_64 0
+          #endif
+          #ifndef TARGET_CPU_ARM
+          #define TARGET_CPU_ARM 0
+          #endif
+          #ifndef TARGET_CPU_ARM64
+          #define TARGET_CPU_ARM64 1
+          #endif
+          #ifndef TARGET_RT_LITTLE_ENDIAN
+          #define TARGET_RT_LITTLE_ENDIAN 1
+          #endif
+          #ifndef TARGET_RT_BIG_ENDIAN
+          #define TARGET_RT_BIG_ENDIAN 0
+          #endif
+          #ifndef TARGET_RT_64_BIT
+          #define TARGET_RT_64_BIT 1
+          #endif
+          #endif
+          EOF
+          fi
+          echo "macOS SDK: ${found:-stub at /opt/unixnu-linux/sdk}"
+          ls /opt/unixnu-linux | head -n 12 || true
+
+      - name: Clone the owner snapshot
+        timeout-minutes: 30
+        run: |
+          git clone --depth 1 --branch "$SNAPSHOT" \
+            https://github.com/Kerfand/UniXNU-Fuxi-Arm64e-iOS17.git "$RUNNER_TEMP/snap"
+          git -C "$RUNNER_TEMP/snap" log --oneline -1
+
+      - name: Rebuild the source tree
+        timeout-minutes: 60
+        run: |
+          bash "$RUNNER_TEMP/snap/tools/reconstruct.sh" "$SRC"
+          ls "$SRC"
+
+      - name: Inject the owner root materials
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/root"
+          unzip -q ci/owner-root.zip -d "$RUNNER_TEMP/root"
+          cp -a "$RUNNER_TEMP/root/verified-root" "$SRC/device-ios17/verified-root"
+          cp -a "$RUNNER_TEMP/root/scripts/build-ios17-verified-root.py" \
+                "$SRC/device-ios17/scripts/build-ios17-verified-root.py"
+          ls -l "$SRC/device-ios17/verified-root/os" "$SRC/device-ios17/verified-root/systemos"
+          grep -n 'verified-root' "$SRC/device-ios17/board.toml" | head -n 10
 
       - name: Configure
-        run: ./unixnu defconfig "$DEFCONFIG" -D "$UNIXNU_DEVICE"
-        working-directory: unixnu
+        run: ./unixnu defconfig "$DEFCONFIG" -D "$SRC/device-ios17"
+        working-directory: ${{ runner.temp }}/src/UniXNU
 
       - name: Fetch the sources
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./unixnu fetch
-        working-directory: unixnu
-
-      - name: Pack the fetched sources
-        run: |
-          cd unixnu
-          tar -cJf "$RUNNER_TEMP/unixnu-out.tar.xz" out
-          ls -lh "$RUNNER_TEMP/unixnu-out.tar.xz"
-          df -h /
-
-      - name: Upload the prepared tree
-        uses: actions/upload-artifact@v4
-        with:
-          name: unixnu-prepared-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/unixnu-out.tar.xz
-          retention-days: 3
-
-  kernel:
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 300
-    steps:
-      - name: Check out UniXNU at the fuxi base commit
-        uses: actions/checkout@v4
-        with:
-          repository: SadNutWall/UniXNU
-          ref: dec111b629bb66d3ec195c653853d8916db42b2a
-          path: unixnu
-          submodules: false
-
-      - name: Check out this repository
-        uses: actions/checkout@v4
-        with:
-          path: ci
-
-      - name: Run actions/setup-python@v5
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Rebuild the iOS 17 framework tree
-        run: |
-          tar -xzf ci/framework-ios17.tar.gz -C "$RUNNER_TEMP"
-          bash "$RUNNER_TEMP/fw/setup-tree.sh" "$RUNNER_TEMP/fw" "$GITHUB_WORKSPACE/unixnu"
-          git -C unixnu log --oneline -5 || true
-
-      - name: Restore the host toolchain
-        uses: actions/cache@v4
-        with:
-          path: /opt/unixnu-linux
-          key: unixnu-linux-${{ runner.os }}-${{ hashFiles('unixnu/scripts/linux/setup-toolchain.py') }}
-
-      - name: Install the small apt packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
-            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
-
-      - name: Ensure the host toolchain entries
-        timeout-minutes: 60
-        run: |
-          set -x
-          timeout 3600 sudo python3 scripts/linux/setup-toolchain.py || true
-          ls -l /usr/bin/xcrun || true
-        working-directory: unixnu
-
-      - name: Provide the Linux stand-ins for xcrun and Homebrew
-        run: |
-          sudo tee /usr/local/bin/xcrun >/dev/null <<'EOF'
-          #!/usr/bin/env bash
-          if [ "$1" = "-f" ]; then
-            p=$(command -v "$2" 2>/dev/null || true)
-            [ -n "$p" ] || p=/usr/bin/$2
-            printf '%s\n' "$p"; exit 0
-          fi
-          while [ $# -gt 0 ]; do
-            case "$1" in
-              --sdk|--toolchain) shift 2 ;;
-              --show-sdk-path)
-                for d in ${SDKROOT:-} /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
-                  if [ -f "$d/usr/include/TargetConditionals.h" ]; then printf '%s\n' "$d"; exit 0; fi
-                done
-                printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
-              -*) shift ;;
-              *) break ;;
-            esac
-          done
-          tool="$1"; shift
-          exec "$tool" "$@"
-          EOF
-          sudo chmod +x /usr/local/bin/xcrun
-          if [ ! -e /usr/bin/xcrun ]; then sudo cp /usr/local/bin/xcrun /usr/bin/xcrun; fi
-          if [ -d /opt/unixnu-linux/bin ]; then
-            for f in /opt/unixnu-linux/bin/*; do
-              sudo ln -sf "$f" "/usr/local/bin/$(basename "$f")"
-            done
-          fi
-
-      - name: Unpack the fuxi iOS 17 device repository
-        run: |
-          tar -xzf ci/device-fuxi-ios17.tar.gz
-          test -f device/board.toml
-          test -f "device/configs/$DEFCONFIG"
-
-      - name: Initialise the device repository
-        run: |
-          cd device
-          git init -q
-          git config user.email ci@localhost
-          git config user.name ci
-          git config commit.gpgsign false
-          git add -A
-          git commit -qm "fuxi device tree"
-          test ! -f .gitmodules
-
-      - name: Download the prepared tree
-        uses: actions/download-artifact@v4
-        with:
-          name: unixnu-prepared-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/prepared
-
-      - name: Restore the fetched sources
-        run: |
-          cd unixnu
-          tar -xJf "$RUNNER_TEMP/prepared/unixnu-out.tar.xz"
-          ls out | head -n 20
-          df -h /
+        working-directory: ${{ runner.temp }}/src/UniXNU
 
       - name: Normalise the reference links
         run: |
@@ -325,57 +272,12 @@ jobs:
             fi
           done
           ls -l out/fuxi/tree/refer | head -n 20
-
-      - name: Provide the macOS SDK header the storage step needs
-        run: |
-          set -eu
-          found=""
-          for d in /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
-            if [ -f "$d/usr/include/TargetConditionals.h" ]; then found="$d"; fi
-          done
-          if [ -z "$found" ]; then
-            echo "::warning::no macOS SDK payload in the toolchain; writing the minimal TargetConditionals.h stub"
-            sudo mkdir -p /opt/unixnu-linux/sdk/usr/include
-            sudo tee /opt/unixnu-linux/sdk/usr/include/TargetConditionals.h >/dev/null <<'EOF'
-          /* Minimal TargetConditionals.h for a Linux build host: only the target macros the public headers test. */
-          #ifndef __TARGETCONDITIONALS__
-          #define __TARGETCONDITIONALS__
-          #define TARGET_OS_MAC          1
-          #define TARGET_OS_OSX          1
-          #define TARGET_OS_UNIX         1
-          #define TARGET_OS_IPHONE       0
-          #define TARGET_OS_IOS          0
-          #define TARGET_OS_WATCH        0
-          #define TARGET_OS_TV           0
-          #define TARGET_OS_EMBEDDED     0
-          #define TARGET_OS_SIMULATOR    0
-          #define TARGET_OS_DRIVERKIT    0
-          #define TARGET_OS_MACCATALYST  0
-          #define TARGET_OS_WIN32        0
-          #define TARGET_CPU_PPC         0
-          #define TARGET_CPU_PPC64       0
-          #define TARGET_CPU_68K         0
-          #define TARGET_CPU_X86         0
-          #define TARGET_CPU_X86_64      1
-          #define TARGET_CPU_ARM         0
-          #define TARGET_CPU_ARM64       0
-          #define TARGET_RT_LITTLE_ENDIAN 1
-          #define TARGET_RT_BIG_ENDIAN    0
-          #define TARGET_RT_64_BIT        1
-          #endif
-          EOF
-          fi
-          echo "macOS SDK: ${found:-stub at /opt/unixnu-linux/sdk}"
-          ls /opt/unixnu-linux | head -n 12 || true
-
-      - name: Configure
-        run: ./unixnu defconfig "$DEFCONFIG" -D "$UNIXNU_DEVICE"
-        working-directory: unixnu
+        working-directory: ${{ runner.temp }}/src/UniXNU
 
       - name: Build kernel
         timeout-minutes: 220
         run: ./unixnu build "$STEPS"
-        working-directory: unixnu
+        working-directory: ${{ runner.temp }}/src/UniXNU
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -384,10 +286,11 @@ jobs:
         if: always()
         run: |
           mkdir -p "$RUNNER_TEMP/result"
+          cd "$SRC/UniXNU"
           find out -maxdepth 6 -name 'kernel.macho' -exec cp {} "$RUNNER_TEMP/result/" \; || true
           find out -maxdepth 6 -name '*.log' -exec cp {} "$RUNNER_TEMP/result/" \; || true
-          # Deliberately no tar of the whole build tree: out/fuxi is ~5 GiB (tree/ 4.3 GiB of object files) and only
-          # matters for forensics without a rebuild. Keep the few intermediates that panic symbolication needs.
+          # Deliberately no tar of the whole build tree: out/fuxi is ~5 GiB of object files and only matters for
+          # a rebuild without sources. Keep the intermediates that panic symbolication needs.
           find out -name 'mach.*.unstripped.noctf' -exec cp {} "$RUNNER_TEMP/result/" \; 2>/dev/null || true
           for bundle in out/fuxi/build/verified-root-os-xnu-bundle out/*/build/verified-root-os-xnu-bundle; do
             if [ -d "$bundle" ]; then
@@ -397,7 +300,7 @@ jobs:
           done
           ls -la "$RUNNER_TEMP/result" | head -n 40
           du -sh "$RUNNER_TEMP/result" || true
-          df -h "$GITHUB_WORKSPACE"
+          df -h /
 
       - name: Upload the kernel and the logs
         if: always()
@@ -413,4 +316,5 @@ jobs:
         run: |
           echo "defconfig: $DEFCONFIG" >> "$GITHUB_STEP_SUMMARY"
           echo "steps: $STEPS" >> "$GITHUB_STEP_SUMMARY"
+          echo "snapshot: $SNAPSHOT" >> "$GITHUB_STEP_SUMMARY"
           du -sh "$RUNNER_TEMP/result" 2>/dev/null || true
