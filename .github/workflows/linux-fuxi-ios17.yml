@@ -126,7 +126,11 @@ jobs:
           while [ $# -gt 0 ]; do
             case "$1" in
               --sdk|--toolchain) shift 2 ;;
-              --show-sdk-path) printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
+              --show-sdk-path)
+                for d in ${SDKROOT:-} /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
+                  if [ -f "$d/usr/include/TargetConditionals.h" ]; then printf '%s\n' "$d"; exit 0; fi
+                done
+                printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
               -*) shift ;;
               *) break ;;
             esac
@@ -257,7 +261,11 @@ jobs:
           while [ $# -gt 0 ]; do
             case "$1" in
               --sdk|--toolchain) shift 2 ;;
-              --show-sdk-path) printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
+              --show-sdk-path)
+                for d in ${SDKROOT:-} /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
+                  if [ -f "$d/usr/include/TargetConditionals.h" ]; then printf '%s\n' "$d"; exit 0; fi
+                done
+                printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
               -*) shift ;;
               *) break ;;
             esac
@@ -317,6 +325,48 @@ jobs:
             fi
           done
           ls -l out/fuxi/tree/refer | head -n 20
+
+      - name: Provide the macOS SDK header the storage step needs
+        run: |
+          set -eu
+          found=""
+          for d in /opt/unixnu-linux/CommandLineTools/SDKs/MacOSX.sdk /opt/unixnu-linux/sdk; do
+            if [ -f "$d/usr/include/TargetConditionals.h" ]; then found="$d"; fi
+          done
+          if [ -z "$found" ]; then
+            echo "::warning::no macOS SDK payload in the toolchain; writing the minimal TargetConditionals.h stub"
+            sudo mkdir -p /opt/unixnu-linux/sdk/usr/include
+            sudo tee /opt/unixnu-linux/sdk/usr/include/TargetConditionals.h >/dev/null <<'EOF'
+          /* Minimal TargetConditionals.h for a Linux build host: only the target macros the public headers test. */
+          #ifndef __TARGETCONDITIONALS__
+          #define __TARGETCONDITIONALS__
+          #define TARGET_OS_MAC          1
+          #define TARGET_OS_OSX          1
+          #define TARGET_OS_UNIX         1
+          #define TARGET_OS_IPHONE       0
+          #define TARGET_OS_IOS          0
+          #define TARGET_OS_WATCH        0
+          #define TARGET_OS_TV           0
+          #define TARGET_OS_EMBEDDED     0
+          #define TARGET_OS_SIMULATOR    0
+          #define TARGET_OS_DRIVERKIT    0
+          #define TARGET_OS_MACCATALYST  0
+          #define TARGET_OS_WIN32        0
+          #define TARGET_CPU_PPC         0
+          #define TARGET_CPU_PPC64       0
+          #define TARGET_CPU_68K         0
+          #define TARGET_CPU_X86         0
+          #define TARGET_CPU_X86_64      1
+          #define TARGET_CPU_ARM         0
+          #define TARGET_CPU_ARM64       0
+          #define TARGET_RT_LITTLE_ENDIAN 1
+          #define TARGET_RT_BIG_ENDIAN    0
+          #define TARGET_RT_64_BIT        1
+          #endif
+          EOF
+          fi
+          echo "macOS SDK: ${found:-stub at /opt/unixnu-linux/sdk}"
+          ls /opt/unixnu-linux | head -n 12 || true
 
       - name: Configure
         run: ./unixnu defconfig "$DEFCONFIG" -D "$UNIXNU_DEVICE"
