@@ -372,6 +372,20 @@ jobs:
           python3 ci/unpack_kernelcache.py ci/kernelcache.release.iphone15 \
             "$SRC/UniXNU/out/ipsw/21H16/kernelcache.decompressed"
 
+      - name: Stage the pinned fuxi GPU firmware
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # archive-19 pulls these three blobs from the GitHub API and the shared runner IP is already rate limited
+          # (HTTP 403 rate limit exceeded). Ship the pinned bytes; the builder skips the download when they exist.
+          root="$SRC/UniXNU/out/fuxi/tree"
+          mkdir -p "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi"
+          cp ci/gmu_gen70200.bin "$root/.cache/firmware/fuxi-gpu/qcom/gmu_gen70200.bin"
+          cp ci/a740_sqe.fw "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi/a740_sqe.fw"
+          cp ci/a740_zap.mbn "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi/a740_zap.mbn"
+          ls -l "$root/.cache/firmware/fuxi-gpu/qcom" "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi"
+
       - name: Build kernel
         timeout-minutes: 220
         run: ./unixnu build "$STEPS"
