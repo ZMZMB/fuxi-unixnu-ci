@@ -386,6 +386,26 @@ jobs:
           cp ci/a740_zap.mbn "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi/a740_zap.mbn"
           ls -l "$root/.cache/firmware/fuxi-gpu/qcom" "$root/.cache/firmware/fuxi-gpu/qcom/sm8550/fuxi"
 
+      - name: Stage the 21H16 data skeleton
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          # BootWatchdogPolicy.c includes "DataSkel21H16.h": the 21H16 OS volume's /private/var template as a table
+          # (tools/mkskel.py). Upstream never commits it because it embeds the volume's bytes. Rebuilt here from the
+          # same 044-18520-018.dmg: 104 directories (Keychains 64:0 0755, mobile 501:501, tmp 1777), 1 symlink,
+          # 8 small template files.
+          h="$GITHUB_WORKSPACE/ci/DataSkel21H16.h"
+          test -s "$h"
+          # Quoted include: clang looks next to BootWatchdogPolicy.c first, so seed every directory that holds it.
+          find "$SRC" -name BootWatchdogPolicy.c -printf '%h\n' | sort -u | while IFS= read -r d; do
+            cp "$h" "$d/DataSkel21H16.h"
+            echo "staged $d/DataSkel21H16.h"
+          done
+          mkdir -p "$SRC/device-ios17/package"
+          cp "$h" "$SRC/device-ios17/package/DataSkel21H16.h"
+          find "$SRC" -name DataSkel21H16.h -not -path '*/out/*' -exec wc -l {} +
+
       - name: Build kernel
         timeout-minutes: 220
         run: ./unixnu build "$STEPS"
