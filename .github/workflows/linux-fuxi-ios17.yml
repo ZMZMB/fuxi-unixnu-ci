@@ -238,6 +238,27 @@ jobs:
           bash "$RUNNER_TEMP/snap/tools/reconstruct.sh" "$SRC"
           ls "$SRC"
 
+      - name: Pin the USB debug module at the qualified revision
+        env:
+          SRC: ${{ runner.temp }}/src
+        run: |
+          set -eux
+          pin=83be5782ad7227d7d245862ce1ae3272cae14242
+          for m in "$SRC/device/drivers/QcomXnuUsbDebug" "$SRC/device-ios17/drivers/QcomXnuUsbDebug"; do
+            [ -d "$m" ] || continue
+            if [ -e "$m/.git" ]; then
+              git -C "$m" fetch -q origin "$pin" || true
+              git -C "$m" checkout -q "$pin"
+            else
+              # The snapshot's device tree points at a commit that only exists on the owner's machine; the
+              # qualified revision is the public one, and his in-tree unit tests assert against exactly that.
+              rm -rf "$m"
+              git clone -q https://github.com/xiaoleGun/QcomXnuUsbDebug.git "$m"
+              git -C "$m" checkout -q "$pin"
+            fi
+            git -C "$m" log --oneline -1
+          done
+
       - name: Align the submodule links with the rebuilt commits
         env:
           SRC: ${{ runner.temp }}/src
