@@ -1,0 +1,347 @@
+name: fuxi ios17 kernel
+
+# iOS 17.7 (21H16) arm64e kernel for the Xiaomi 13 (fuxi).
+# Rebuilds the author's tree on the public base commit: framework commits + diff from
+# Kerfand/UniXNU-Fuxi-Arm64e-iOS17, device tree from device-fuxi-ios17.tar.gz, with
+# NATIVE_VERIFIED_BLOCK dropped so the owner root uses the development transport.
+#
+#   prepare : toolchain + patches + defconfig + fetch -> caches /opt/unixnu-linux, uploads out/
+#   kernel  : restores both, builds, uploads kernel.macho
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfig:
+        description: 'defconfig'
+        required: true
+        default: 'fuxi_ios17_kernel_defconfig'
+      steps:
+        description: 'unixnu build steps'
+        required: true
+        default: 'kernel'
+
+env:
+  DEFCONFIG: ${{ inputs.defconfig }}
+  STEPS: ${{ inputs.steps }}
+  UNIXNU_DEVICE: ${{ github.workspace }}/device
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out UniXNU at the fuxi base commit
+        uses: actions/checkout@v4
+        with:
+          repository: SadNutWall/UniXNU
+          ref: dec111b629bb66d3ec195c653853d8916db42b2a
+          path: unixnu
+          submodules: false
+
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Run actions/setup-python@v5
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Rebuild the iOS 17 framework tree
+        run: |
+          tar -xzf ci/framework-ios17.tar.gz -C "$RUNNER_TEMP"
+          bash "$RUNNER_TEMP/fw/setup-tree.sh" "$RUNNER_TEMP/fw" "$GITHUB_WORKSPACE/unixnu"
+          git -C unixnu log --oneline -8 || true
+
+      - name: Unpack the fuxi iOS 17 device repository
+        run: |
+          tar -xzf ci/device-fuxi-ios17.tar.gz
+          ls device | head -n 40
+          test -f device/board.toml
+          test -f "device/configs/$DEFCONFIG"
+          test -d device/patches/xnu-10063-arm64e
+          grep -c 'DNATIVE_VERIFIED_BLOCK=1' device/scripts/build-arm-driver.py || true
+
+      - name: Initialise the device repository
+        run: |
+          cd device
+          git init -q
+          git config user.email ci@localhost
+          git config user.name ci
+          git config commit.gpgsign false
+          git add -A
+          git commit -qm "fuxi device tree"
+          git log --oneline -1
+          test ! -f .gitmodules
+
+      - name: Restore the host toolchain
+        id: toolchain-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/unixnu-linux
+          key: unixnu-linux-${{ runner.os }}-${{ hashFiles('unixnu/scripts/linux/setup-toolchain.py') }}
+
+      - name: Install host tools
+        timeout-minutes: 300
+        run: |
+          set -x
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
+            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
+          python3 scripts/linux/setup-toolchain.py --print-packages || true
+          timeout 10800 sudo python3 scripts/linux/setup-toolchain.py
+          du -sh /opt/unixnu-linux 2>/dev/null || true
+          ls -l /usr/bin/xcrun 2>/dev/null || true
+        working-directory: unixnu
+
+      - name: Install the small apt packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
+            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
+
+      - name: Provide the Linux stand-ins for xcrun and Homebrew
+        run: |
+          sudo tee /usr/local/bin/xcrun >/dev/null <<'EOF'
+          #!/usr/bin/env bash
+          if [ "$1" = "-f" ]; then
+            p=$(command -v "$2" 2>/dev/null || true)
+            [ -n "$p" ] || p=/usr/bin/$2
+            printf '%s\n' "$p"; exit 0
+          fi
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --sdk|--toolchain) shift 2 ;;
+              --show-sdk-path) printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
+              -*) shift ;;
+              *) break ;;
+            esac
+          done
+          tool="$1"; shift
+          exec "$tool" "$@"
+          EOF
+          sudo tee /usr/local/bin/brew >/dev/null <<'EOF'
+          #!/usr/bin/env bash
+          if [ "$1" = "--prefix" ]; then
+            for d in /opt/unixnu-linux /opt/unixnu-linux/llvm /usr/lib/llvm-*; do
+              if [ -x "$d/bin/llvm-nm" ]; then printf '%s\n' "$d"; exit 0; fi
+            done
+            printf '%s\n' /opt/unixnu-linux; exit 0
+          fi
+          exit 1
+          EOF
+          sudo chmod +x /usr/local/bin/xcrun /usr/local/bin/brew
+          if [ ! -e /usr/bin/xcrun ]; then sudo cp /usr/local/bin/xcrun /usr/bin/xcrun; fi
+          if [ -d /opt/unixnu-linux/bin ]; then
+            for f in /opt/unixnu-linux/bin/*; do
+              sudo ln -sf "$f" "/usr/local/bin/$(basename "$f")"
+            done
+          fi
+          for t in llvm-nm llvm-objcopy llvm-ar llvm-objdump llvm-readelf llvm-size llvm-strip; do
+            if ! command -v "$t" >/dev/null 2>&1; then
+              src=$(find /usr/lib/llvm-* -type f -name "$t" 2>/dev/null | head -n1)
+              [ -n "$src" ] && sudo ln -sf "$src" "/usr/local/bin/$t"
+            fi
+          done
+          for t in xcrun brew clang llvm-nm llvm-objcopy llvm-ar lzfse dtc make; do
+            printf '%-14s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+          done
+
+      - name: Report the runner toolchain
+        run: |
+          uname -a
+          python3 --version
+          for t in git make clang cmake ninja unifdef ld lzfse dtc; do
+            printf '%-8s %s\n' "$t" "$(command -v "$t" || echo MISSING)"
+          done
+          ls /opt/unixnu-linux
+          df -h /
+
+      - name: Configure
+        run: ./unixnu defconfig "$DEFCONFIG" -D "$UNIXNU_DEVICE"
+        working-directory: unixnu
+
+      - name: Fetch the sources
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./unixnu fetch
+        working-directory: unixnu
+
+      - name: Pack the fetched sources
+        run: |
+          cd unixnu
+          tar -cJf "$RUNNER_TEMP/unixnu-out.tar.xz" out
+          ls -lh "$RUNNER_TEMP/unixnu-out.tar.xz"
+          df -h /
+
+      - name: Upload the prepared tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: unixnu-prepared-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/unixnu-out.tar.xz
+          retention-days: 3
+
+  kernel:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: Check out UniXNU at the fuxi base commit
+        uses: actions/checkout@v4
+        with:
+          repository: SadNutWall/UniXNU
+          ref: dec111b629bb66d3ec195c653853d8916db42b2a
+          path: unixnu
+          submodules: false
+
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Run actions/setup-python@v5
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Rebuild the iOS 17 framework tree
+        run: |
+          tar -xzf ci/framework-ios17.tar.gz -C "$RUNNER_TEMP"
+          bash "$RUNNER_TEMP/fw/setup-tree.sh" "$RUNNER_TEMP/fw" "$GITHUB_WORKSPACE/unixnu"
+          git -C unixnu log --oneline -5 || true
+
+      - name: Restore the host toolchain
+        uses: actions/cache@v4
+        with:
+          path: /opt/unixnu-linux
+          key: unixnu-linux-${{ runner.os }}-${{ hashFiles('unixnu/scripts/linux/setup-toolchain.py') }}
+
+      - name: Install the small apt packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git make cmake ninja-build unifdef lz4 xz-utils \
+            pkg-config libssl-dev device-tree-compiler mtools bzip2 zip llvm
+
+      - name: Ensure the host toolchain entries
+        timeout-minutes: 60
+        run: |
+          set -x
+          timeout 3600 sudo python3 scripts/linux/setup-toolchain.py || true
+          ls -l /usr/bin/xcrun || true
+        working-directory: unixnu
+
+      - name: Provide the Linux stand-ins for xcrun and Homebrew
+        run: |
+          sudo tee /usr/local/bin/xcrun >/dev/null <<'EOF'
+          #!/usr/bin/env bash
+          if [ "$1" = "-f" ]; then
+            p=$(command -v "$2" 2>/dev/null || true)
+            [ -n "$p" ] || p=/usr/bin/$2
+            printf '%s\n' "$p"; exit 0
+          fi
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --sdk|--toolchain) shift 2 ;;
+              --show-sdk-path) printf '%s\n' "${SDKROOT:-/opt/unixnu-linux/sdk}"; exit 0 ;;
+              -*) shift ;;
+              *) break ;;
+            esac
+          done
+          tool="$1"; shift
+          exec "$tool" "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/xcrun
+          if [ ! -e /usr/bin/xcrun ]; then sudo cp /usr/local/bin/xcrun /usr/bin/xcrun; fi
+          if [ -d /opt/unixnu-linux/bin ]; then
+            for f in /opt/unixnu-linux/bin/*; do
+              sudo ln -sf "$f" "/usr/local/bin/$(basename "$f")"
+            done
+          fi
+
+      - name: Unpack the fuxi iOS 17 device repository
+        run: |
+          tar -xzf ci/device-fuxi-ios17.tar.gz
+          test -f device/board.toml
+          test -f "device/configs/$DEFCONFIG"
+
+      - name: Initialise the device repository
+        run: |
+          cd device
+          git init -q
+          git config user.email ci@localhost
+          git config user.name ci
+          git config commit.gpgsign false
+          git add -A
+          git commit -qm "fuxi device tree"
+          test ! -f .gitmodules
+
+      - name: Download the prepared tree
+        uses: actions/download-artifact@v4
+        with:
+          name: unixnu-prepared-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/prepared
+
+      - name: Restore the fetched sources
+        run: |
+          cd unixnu
+          tar -xJf "$RUNNER_TEMP/prepared/unixnu-out.tar.xz"
+          ls out | head -n 20
+          df -h /
+
+      - name: Normalise the reference links
+        run: |
+          set -eux
+          for link in out/fuxi/tree/refer/*; do
+            [ -e "$link" ] || continue
+            [ -L "$link" ] && continue
+            name=$(basename "$link")
+            feed=$(ls -d "out/fuxi/feeds/$name-"* 2>/dev/null | head -n1 || true)
+            if [ -n "$feed" ]; then
+              rm -rf "$link"
+              ln -sfn "$(cd "$feed" && pwd)" "$link"
+            fi
+          done
+          ls -l out/fuxi/tree/refer | head -n 20
+
+      - name: Configure
+        run: ./unixnu defconfig "$DEFCONFIG" -D "$UNIXNU_DEVICE"
+        working-directory: unixnu
+
+      - name: Build kernel
+        timeout-minutes: 220
+        run: ./unixnu build "$STEPS"
+        working-directory: unixnu
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Collect the results
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/result"
+          find out -maxdepth 6 -name 'kernel.macho' -exec cp {} "$RUNNER_TEMP/result/" \; || true
+          find out -maxdepth 6 -name '*.log' -exec cp {} "$RUNNER_TEMP/result/" \; || true
+          ( tar -cJf "$RUNNER_TEMP/result/fuxi-build.tar.xz" -C out fuxi/build 2>/dev/null || true )
+          ls -la "$RUNNER_TEMP/result" | head -n 40
+          du -sh "$RUNNER_TEMP/result" || true
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Upload the kernel and the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuxi-ios17-kernel-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/result/*
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "defconfig: $DEFCONFIG" >> "$GITHUB_STEP_SUMMARY"
+          echo "steps: $STEPS" >> "$GITHUB_STEP_SUMMARY"
+          du -sh "$RUNNER_TEMP/result" 2>/dev/null || true
