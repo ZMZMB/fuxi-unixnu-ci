@@ -12,9 +12,11 @@ NEW = ("inputs = args.inputs or (Path(ADX_PINS) if ADX_PINS else "
        "root / 'scripts' / 'data' / 'adreno-inputs.json')")
 HEADER = "ADX_PINS = os.environ.get('UNIXNU_ADRENO_PINS', %r)\n" % pins
 
-targets = [p for p in sorted(root.glob('device/scripts/prepare-fuxi-*.py')) if OLD in p.read_text()]
+targets = [p for p in sorted(root.glob('**/scripts/prepare-fuxi-*.py'))
+           if '/out/' not in str(p).replace('\\', '/') and OLD in p.read_text()]
 if not targets:
     raise SystemExit('no Adreno prepare script with the default pins lookup under ' + str(root))
+print('targets:', ', '.join(str(t) for t in targets))
 
 for path in targets:
     text = path.read_text()
