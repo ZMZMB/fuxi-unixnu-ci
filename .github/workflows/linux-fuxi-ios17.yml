@@ -6,7 +6,8 @@ name: fuxi ios17 kernel
 # NATIVE_VERIFIED_BLOCK dropped so the owner root uses the development transport.
 #
 #   prepare : toolchain + patches + defconfig + fetch -> caches /opt/unixnu-linux, uploads out/
-#   kernel  : restores both, builds, uploads kernel.macho
+#   kernel  : restores both, builds, uploads kernel.macho, the logs and the unstripped kernel
+#             (no tar of the whole build tree: out/fuxi is ~5 GiB and rarely needed)
 
 on:
   workflow_dispatch:
@@ -325,7 +326,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/result"
           find out -maxdepth 6 -name 'kernel.macho' -exec cp {} "$RUNNER_TEMP/result/" \; || true
           find out -maxdepth 6 -name '*.log' -exec cp {} "$RUNNER_TEMP/result/" \; || true
-          ( tar -cJf "$RUNNER_TEMP/result/fuxi-build.tar.xz" -C out fuxi/build 2>/dev/null || true )
+          # Deliberately no tar of the whole build tree: out/fuxi is ~5 GiB (tree/ 4.3 GiB of object files) and only
+          # matters for forensics without a rebuild. Keep the few intermediates that panic symbolication needs.
+          find out -name 'mach.*.unstripped.noctf' -exec cp {} "$RUNNER_TEMP/result/" \; 2>/dev/null || true
+          for bundle in out/fuxi/build/verified-root-os-xnu-bundle out/*/build/verified-root-os-xnu-bundle; do
+            if [ -d "$bundle" ]; then
+              mkdir -p "$RUNNER_TEMP/result/verified-root-os-xnu-bundle"
+              cp -r "$bundle/." "$RUNNER_TEMP/result/verified-root-os-xnu-bundle/" 2>/dev/null || true
+            fi
+          done
           ls -la "$RUNNER_TEMP/result" | head -n 40
           du -sh "$RUNNER_TEMP/result" || true
           df -h "$GITHUB_WORKSPACE"
