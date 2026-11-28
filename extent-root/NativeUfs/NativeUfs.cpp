@@ -34,6 +34,7 @@ extern const uint8_t verified_root_key[];
 #include "RootDiagnostics.h"
 #include "TransferPoll.h"
 #include "SmmuTakeover.h"
+#include "RootExtents.h"
 
 static UfsRootDiagnostics gRootDiagnostic;
 static bool gRootDiagnosticEnabled;
@@ -972,7 +973,6 @@ static void hostWrite (unsigned offset, uint32_t value)
 
 #include "RootQueue.h"
 
-#include "RootExtents.h"
 #include "RootCommands.h"
 
 // Bring the live controller up for reading: map, SMMU pass-through for the UFS stream, take over
