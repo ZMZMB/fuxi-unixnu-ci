@@ -10,19 +10,39 @@
 // and the window readers see the file as if it were the partition, while Android's own data (everything
 // outside those extents) is never read for the root and never written.
 #include <IOKit/IODeviceTreeSupport.h>
+#include <IOKit/IOLib.h>
 #include <IOKit/IORegistryEntry.h>
 
+// Upper bound on accepted entries, not on storage: the table is allocated from the IOKit heap when the
+// property is read. A static 8192 entry array (196,608 B of __BSS) pushed the native __DATA segment past
+// the retained-data window that XNU's prelink layout allows, so the kernel link failed.
 #define kFxMaxExtents 8192U
 // Virtual 4 KiB LBA base, well above any real partition on this LUN (userdata ends near 0x03a00000).
 static constexpr uint64_t kFxVirtualFirst = 0x10000000ULL;
 
 struct FxExtent { uint64_t file, part, count; };
-static FxExtent gFxExtent[kFxMaxExtents];
+static FxExtent *gFxExtent;
 static uint32_t gFxExtentCount;
+static uint32_t gFxExtentCapacity;
 static bool gFxRootActive;
 static uint64_t gFxRootBlocks;
 
-// Logical root block -> device LBA plus the blocks left in that extent. Linear over <= 8192 entries.
+static bool fxReserveExtents (uint32_t count)
+{
+  if (count <= gFxExtentCapacity) return gFxExtent != nullptr;
+  uint32_t bytes = count * static_cast<uint32_t> (sizeof (FxExtent));
+  FxExtent *fresh = static_cast<FxExtent *> (IOMalloc (bytes));
+  if (!fresh) {
+    IOLog ("FUXI ROOT: cannot allocate %u bytes for %u extents\n", bytes, count);
+    return false;
+  }
+  if (gFxExtent) IOFree (gFxExtent, gFxExtentCapacity * static_cast<uint32_t> (sizeof (FxExtent)));
+  gFxExtent = fresh;
+  gFxExtentCapacity = count;
+  return true;
+}
+
+// Logical root block -> device LBA plus the blocks left in that extent.
 static bool fxMapRoot (uint64_t logical, uint64_t *lba, uint64_t *run)
 {
   for (uint32_t i = 0; i < gFxExtentCount; ++i) {
@@ -66,6 +86,10 @@ static bool fxLoadRootExtents (uint64_t partFirst, uint64_t partLast)
   }
   const uint64_t *entry = static_cast<const uint64_t *> (table->getBytesNoCopy ());
   uint32_t count = bytes / (3 * sizeof (uint64_t));
+  if (!fxReserveExtents (count)) {
+    chosen->release ();
+    return false;
+  }
   uint64_t partBlocks = partLast - partFirst + 1, covered = 0;
   IOLog ("FUXI ROOT: %u extents, 0x%llx blocks, partition first 0x%llx (%llu blocks)\n",
          count, want, partFirst, partBlocks);
